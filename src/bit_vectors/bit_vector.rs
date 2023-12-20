@@ -38,6 +38,10 @@ pub const WORD_LEN: usize = std::mem::size_of::<usize>() * 8;
 ///
 /// This is a yet another Rust port of [succinct::bit_vector](https://github.com/ot/succinct/blob/master/bit_vector.hpp).
 #[derive(Default, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct BitVector {
     words: Vec<usize>,
     len: usize,
@@ -671,6 +675,171 @@ impl BitVector {
     }
 }
 
+#[cfg(feature = "rkyv")]
+impl ArchivedBitVector {
+    #[allow(missing_docs)]
+    pub fn get_bit(&self, pos: usize) -> Option<bool> {
+        if pos < self.len as usize {
+            let (block, shift) = (pos / WORD_LEN, pos % WORD_LEN);
+            Some((self.words[block] >> shift) & 1 == 1)
+        } else {
+            None
+        }
+    }
+
+    #[allow(missing_docs)]
+    #[inline(always)]
+    pub fn get_bits(&self, pos: usize, len: usize) -> Option<usize> {
+        if WORD_LEN < len || self.len() < pos + len {
+            return None;
+        }
+        if len == 0 {
+            return Some(0);
+        }
+        let (block, shift) = (pos / WORD_LEN, pos % WORD_LEN);
+        let mask = {
+            if len < WORD_LEN {
+                (1 << len) - 1
+            } else {
+                std::usize::MAX
+            }
+        };
+        let bits = if shift + len <= WORD_LEN {
+            (self.words[block] as usize) >> shift & mask
+        } else {
+            ((self.words[block] as usize) >> shift)
+                | ((self.words[block + 1] as usize) << (WORD_LEN - shift) & mask)
+        };
+        Some(bits)
+    }
+
+    #[allow(missing_docs)]
+    pub fn predecessor1(&self, pos: usize) -> Option<usize> {
+        if self.len() <= pos {
+            return None;
+        }
+        let mut block = pos / WORD_LEN;
+        let shift = WORD_LEN - pos % WORD_LEN - 1;
+        let mut word = (self.words[block] << shift) >> shift;
+        loop {
+            if let Some(ret) = broadword::msb(word as usize) {
+                return Some(block * WORD_LEN + ret);
+            } else if block == 0 {
+                return None;
+            }
+            block -= 1;
+            word = self.words[block];
+        }
+    }
+
+    #[allow(missing_docs)]
+    pub fn predecessor0(&self, pos: usize) -> Option<usize> {
+        if self.len() <= pos {
+            return None;
+        }
+        let mut block = pos / WORD_LEN;
+        let shift = WORD_LEN - pos % WORD_LEN - 1;
+        let mut word = (!self.words[block] << shift) >> shift;
+        loop {
+            if let Some(ret) = broadword::msb(word as usize) {
+                return Some(block * WORD_LEN + ret);
+            } else if block == 0 {
+                return None;
+            }
+            block -= 1;
+            word = !self.words[block];
+        }
+    }
+
+    #[allow(missing_docs)]
+    pub fn successor1(&self, pos: usize) -> Option<usize> {
+        if self.len() <= pos {
+            return None;
+        }
+        let mut block = pos / WORD_LEN;
+        let shift = pos % WORD_LEN;
+        let mut word = (self.words[block] >> shift) << shift;
+        loop {
+            if let Some(ret) = broadword::lsb(word as usize) {
+                return Some(block * WORD_LEN + ret).filter(|&i| i < self.len());
+            }
+            block += 1;
+            if block == self.words.len() {
+                return None;
+            }
+            word = self.words[block];
+        }
+    }
+
+    #[allow(missing_docs)]
+    pub fn successor0(&self, pos: usize) -> Option<usize> {
+        if self.len() <= pos {
+            return None;
+        }
+        let mut block = pos / WORD_LEN;
+        let shift = pos % WORD_LEN;
+        let mut word = (!self.words[block] >> shift) << shift;
+        loop {
+            if let Some(ret) = broadword::lsb(word as usize) {
+                return Some(block * WORD_LEN + ret).filter(|&i| i < self.len());
+            }
+            block += 1;
+            if block == self.words.len() {
+                return None;
+            }
+            word = !self.words[block];
+        }
+    }
+
+    // pub const fn iter(&self) -> Iter {
+    //     Iter::new(self)
+    // }
+    //
+    // pub fn unary_iter(&self, pos: usize) -> UnaryIter {
+    //     UnaryIter::new(self, pos)
+    // }
+
+    #[allow(missing_docs)]
+    #[inline(always)]
+    pub fn get_word64(&self, pos: usize) -> Option<usize> {
+        if self.len as usize <= pos {
+            return None;
+        }
+        let (block, shift) = (pos / WORD_LEN, pos % WORD_LEN);
+        let mut word = self.words[block] >> shift;
+        if shift != 0 && block + 1 < self.words.len() {
+            word |= self.words[block + 1] << (64 - shift);
+        }
+        Some(word as usize)
+    }
+
+    #[allow(missing_docs)]
+    pub const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    #[allow(missing_docs)]
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[allow(missing_docs)]
+    pub fn words(&self) -> &[u64] {
+        self.words.as_slice()
+    }
+
+    #[allow(missing_docs)]
+    pub fn capacity(&self) -> usize {
+        self.words.len() * WORD_LEN
+    }
+
+    #[allow(missing_docs)]
+    #[inline(always)]
+    pub fn num_words(&self) -> usize {
+        self.words.len()
+    }
+}
+
 impl Build for BitVector {
     /// Creates a new vector from input bit stream `bits`.
     ///
@@ -714,6 +883,17 @@ impl NumBits for BitVector {
     }
 }
 
+#[cfg(feature = "rkyv")]
+impl NumBits for ArchivedBitVector {
+    fn num_bits(&self) -> usize {
+        self.len()
+    }
+
+    fn num_ones(&self) -> usize {
+        self.rank1(self.len as usize).unwrap()
+    }
+}
+
 impl Access for BitVector {
     /// Returns the `pos`-th bit, or [`None`] if out of bounds.
     ///
@@ -734,6 +914,18 @@ impl Access for BitVector {
     /// ```
     fn access(&self, pos: usize) -> Option<bool> {
         if pos < self.len {
+            let (block, shift) = (pos / WORD_LEN, pos % WORD_LEN);
+            Some((self.words[block] >> shift) & 1 == 1)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl Access for ArchivedBitVector {
+    fn access(&self, pos: usize) -> Option<bool> {
+        if pos < self.len as usize {
             let (block, shift) = (pos / WORD_LEN, pos % WORD_LEN);
             Some((self.words[block] >> shift) & 1 == 1)
         } else {
@@ -796,6 +988,28 @@ impl Rank for BitVector {
     /// assert_eq!(bv.rank0(4), Some(2));
     /// assert_eq!(bv.rank0(5), None);
     /// ```
+    fn rank0(&self, pos: usize) -> Option<usize> {
+        Some(pos - self.rank1(pos)?)
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl Rank for ArchivedBitVector {
+    fn rank1(&self, pos: usize) -> Option<usize> {
+        if self.len() < pos {
+            return None;
+        }
+        let mut r = 0;
+        let (wpos, left) = (pos / WORD_LEN, pos % WORD_LEN);
+        for &w in &self.words[..wpos] {
+            r += broadword::popcount(w as usize);
+        }
+        if left != 0 {
+            r += broadword::popcount((self.words[wpos] as usize) << (WORD_LEN - left));
+        }
+        Some(r)
+    }
+
     fn rank0(&self, pos: usize) -> Option<usize> {
         Some(pos - self.rank1(pos)?)
     }
@@ -877,6 +1091,49 @@ impl Select for BitVector {
     }
 }
 
+#[cfg(feature = "rkyv")]
+impl Select for ArchivedBitVector {
+    fn select1(&self, k: usize) -> Option<usize> {
+        let mut wpos = 0;
+        let mut cur_rank = 0;
+        while wpos < self.words.len() {
+            let cnt = broadword::popcount(self.words[wpos] as usize);
+            if k < cur_rank + cnt {
+                break;
+            }
+            wpos += 1;
+            cur_rank += cnt;
+        }
+        if wpos == self.words.len() {
+            return None;
+        }
+        let sel = wpos * WORD_LEN
+            + broadword::select_in_word(self.words[wpos] as usize, k - cur_rank).unwrap();
+        Some(sel)
+    }
+
+    fn select0(&self, k: usize) -> Option<usize> {
+        let mut wpos = 0;
+        let mut cur_rank = 0;
+        while wpos < self.words.len() {
+            let cnt = broadword::popcount(!self.words[wpos] as usize);
+            if k < cur_rank + cnt {
+                break;
+            }
+            wpos += 1;
+            cur_rank += cnt;
+        }
+        if wpos == self.words.len() {
+            return None;
+        }
+        let sel = wpos * WORD_LEN
+            + broadword::select_in_word(!self.words[wpos] as usize, k - cur_rank).unwrap();
+        // NOTE(kampersanda): sel can be no less than self.len() because overflowed bits are
+        // initialized by zero and can be considered by select0.
+        (sel < self.len()).then(|| sel)
+    }
+}
+
 /// Iterator for enumerating bits, created by [`BitVector::iter()`].
 pub struct Iter<'a> {
     bv: &'a BitVector,
@@ -926,6 +1183,20 @@ impl std::fmt::Debug for BitVector {
             *b = self.access(i).unwrap() as u8;
         }
         f.debug_struct("BitVector")
+            .field("bits", &bits)
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl std::fmt::Debug for ArchivedBitVector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut bits = vec![0u8; self.len()];
+        for (i, b) in bits.iter_mut().enumerate() {
+            *b = self.access(i).unwrap() as u8;
+        }
+        f.debug_struct("ArchivedBitVector")
             .field("bits", &bits)
             .field("len", &self.len)
             .finish()
@@ -1044,5 +1315,28 @@ mod tests {
         assert_eq!(bv, other);
         assert_eq!(size, bytes.len());
         assert_eq!(size, bv.size_in_bytes());
+    }
+
+    #[cfg(feature = "rkyv")]
+    #[test]
+    fn test_rkyv() {
+        use rkyv::{
+            ser::{serializers::AllocSerializer, Serializer},
+            Deserialize,
+        };
+
+        let bv = BitVector::from_bits([false, true, false, false, true]);
+
+        let mut serializer = AllocSerializer::<4096>::default();
+        serializer.serialize_value(&bv).unwrap();
+        let buf = serializer.into_serializer().into_inner();
+
+        let archived_bv = unsafe { rkyv::archived_root::<BitVector>(&buf) };
+        for i in 0..archived_bv.len() {
+            assert_eq!(bv.access(i), archived_bv.access(i));
+        }
+
+        let other_bv: BitVector = archived_bv.deserialize(&mut rkyv::Infallible).unwrap();
+        assert_eq!(bv, other_bv);
     }
 }

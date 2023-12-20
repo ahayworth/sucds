@@ -94,6 +94,9 @@ pub use darray::DArray;
 pub use rank9sel::Rank9Sel;
 pub use sarray::SArray;
 
+#[cfg(feature = "rkyv")]
+pub use bit_vector::ArchivedBitVector;
+
 use anyhow::Result;
 
 /// Interface for building a bit vector with rank/select queries.

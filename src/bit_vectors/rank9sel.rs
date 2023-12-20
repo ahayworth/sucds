@@ -12,6 +12,11 @@ use crate::bit_vectors::BitVector;
 use crate::Serializable;
 use inner::Rank9SelIndex;
 
+#[cfg(feature = "rkyv")]
+use crate::bit_vectors::ArchivedBitVector;
+#[cfg(feature = "rkyv")]
+use inner::ArchivedRank9SelIndex;
+
 /// Rank/select data structure over bit vectors with Vigna's rank9 and hinted selection techniques.
 ///
 /// This builds rank/select indices on [`BitVector`] taking
@@ -54,6 +59,11 @@ use inner::Rank9SelIndex;
 ///
 ///  - S. Vigna, "Broadword implementation of rank/select queries," In WEA, 2008.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize),
+    archive_attr(derive(Debug))
+)]
 pub struct Rank9Sel {
     bv: BitVector,
     rs: Rank9SelIndex,
@@ -99,6 +109,29 @@ impl Rank9Sel {
 
     /// Returns the reference of the internal rank/select index.
     pub const fn rs_index(&self) -> &Rank9SelIndex {
+        &self.rs
+    }
+
+    /// Returns the number of bits stored.
+    pub const fn len(&self) -> usize {
+        self.bv.len()
+    }
+
+    /// Checks if the vector is empty.
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl ArchivedRank9Sel {
+    /// Returns the reference of the internal bit vector.
+    pub const fn bit_vector(&self) -> &ArchivedBitVector {
+        &self.bv
+    }
+
+    /// Returns the reference of the internal rank/select index.
+    pub const fn rs_index(&self) -> &ArchivedRank9SelIndex {
         &self.rs
     }
 
@@ -161,6 +194,21 @@ impl NumBits for Rank9Sel {
     }
 }
 
+#[cfg(feature = "rkyv")]
+impl NumBits for ArchivedRank9Sel {
+    /// Returns the number of bits stored (just wrapping [`Self::len()`]).
+    #[inline(always)]
+    fn num_bits(&self) -> usize {
+        self.len()
+    }
+
+    /// Returns the number of bits set.
+    #[inline(always)]
+    fn num_ones(&self) -> usize {
+        self.rs.num_ones()
+    }
+}
+
 impl Access for Rank9Sel {
     /// Returns the `pos`-th bit, or [`None`] if out of bounds.
     ///
@@ -176,6 +224,13 @@ impl Access for Rank9Sel {
     /// assert_eq!(bv.access(2), Some(false));
     /// assert_eq!(bv.access(3), None);
     /// ```
+    fn access(&self, pos: usize) -> Option<bool> {
+        self.bv.access(pos)
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl Access for ArchivedRank9Sel {
     fn access(&self, pos: usize) -> Option<bool> {
         self.bv.access(pos)
     }
@@ -231,6 +286,17 @@ impl Rank for Rank9Sel {
     }
 }
 
+#[cfg(feature = "rkyv")]
+impl Rank for ArchivedRank9Sel {
+    fn rank1(&self, pos: usize) -> Option<usize> {
+        unsafe { self.rs.rank1(&self.bv, pos) }
+    }
+
+    fn rank0(&self, pos: usize) -> Option<usize> {
+        unsafe { self.rs.rank0(&self.bv, pos) }
+    }
+}
+
 impl Select for Rank9Sel {
     /// Searches the position of the `k`-th bit set, or
     /// [`None`] if `self.num_ones() <= k`.
@@ -272,6 +338,17 @@ impl Select for Rank9Sel {
     /// assert_eq!(bv.select0(1), Some(2));
     /// assert_eq!(bv.select0(2), None);
     /// ```
+    fn select0(&self, k: usize) -> Option<usize> {
+        unsafe { self.rs.select0(&self.bv, k) }
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl Select for ArchivedRank9Sel {
+    fn select1(&self, k: usize) -> Option<usize> {
+        unsafe { self.rs.select1(&self.bv, k) }
+    }
+
     fn select0(&self, k: usize) -> Option<usize> {
         unsafe { self.rs.select0(&self.bv, k) }
     }
@@ -359,5 +436,30 @@ mod tests {
         assert_eq!(bv, other);
         assert_eq!(size, bytes.len());
         assert_eq!(size, bv.size_in_bytes());
+    }
+
+    #[cfg(feature = "rkyv")]
+    #[test]
+    fn test_rkyv() {
+        use rkyv::{
+            ser::{serializers::AllocSerializer, Serializer},
+            Deserialize,
+        };
+
+        let bv = Rank9Sel::from_bits([false, true, true, false, true])
+            .select1_hints()
+            .select0_hints();
+
+        let mut serializer = AllocSerializer::<4096>::default();
+        serializer.serialize_value(&bv).unwrap();
+        let buf = serializer.into_serializer().into_inner();
+
+        let archived_bv = unsafe { rkyv::archived_root::<Rank9Sel>(&buf) };
+        for i in 0..archived_bv.len() {
+            assert_eq!(bv.access(i), archived_bv.access(i));
+        }
+
+        let other_bv: Rank9Sel = archived_bv.deserialize(&mut rkyv::Infallible).unwrap();
+        assert_eq!(bv, other_bv);
     }
 }
